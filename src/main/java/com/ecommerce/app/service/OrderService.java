@@ -40,6 +40,7 @@ public class OrderService {
     private final AddressRepository addressRepository;
     private final ProductVariantRepository productVariantRepository;
     private final InventoryService inventoryService;
+    private static final Long DEFAULT_WAREHOUSE_ID = 1L; // Should be externalized in a real app
 
     @Transactional
     public OrderDto createOrder(UserPrincipal currentUser, CreateOrderDto orderData) {
@@ -54,7 +55,7 @@ public class OrderService {
         }
         // ... Similar check for billing address ...
 
-        inventoryService.checkAndReserveStock(orderData.items());
+        inventoryService.checkAndReserveStock(orderData.items(), DEFAULT_WAREHOUSE_ID);
 
         Order newOrder = new Order();
         newOrder.setUser(user);
@@ -117,17 +118,32 @@ public class OrderService {
         Order order = orderRepository.findById(orderId)
                 .orElseThrow(() -> new ResourceNotFoundException("Order", "id", orderId));
 
-        // Add state machine logic here if needed (e.g., can't cancel a shipped order)
-        if (order.getStatus() == OrderStatus.SHIPPED || order.getStatus() == OrderStatus.DELIVERED) {
+        OrderStatus newStatus = statusUpdateDto.status();
+        OrderStatus currentStatus = order.getStatus();
+
+        if (newStatus == currentStatus) {
+            return OrderDto.toDto(order); // No change
+        }
+
+        // Add state machine logic here (e.g., can't cancel a shipped order)
+        if (currentStatus == OrderStatus.SHIPPED || currentStatus == OrderStatus.DELIVERED
+                || currentStatus == OrderStatus.CANCELLED) {
             throw new InvalidOperationException(
-                    "Cannot change status of an order that has already been shipped or delivered.");
+                    "Cannot change status of an order that has already been shipped, delivered, or cancelled.");
         }
 
-        if (order.getStatus() != OrderStatus.CANCELLED && statusUpdateDto.status() == OrderStatus.CANCELLED) {
-            inventoryService.releaseStock(order);
+        if (newStatus == OrderStatus.CANCELLED) {
+            inventoryService.releaseStock(order, DEFAULT_WAREHOUSE_ID);
         }
 
-        order.setStatus(statusUpdateDto.status());
+        // --- NEW LOGIC ---
+        // If moving to SHIPPED, deduct the stock from inventory permanently
+        if (newStatus == OrderStatus.SHIPPED) {
+            inventoryService.deductCommittedStock(order, DEFAULT_WAREHOUSE_ID);
+        }
+        // --- END NEW LOGIC ---
+
+        order.setStatus(newStatus);
         return OrderDto.toDto(orderRepository.save(order));
     }
 }
